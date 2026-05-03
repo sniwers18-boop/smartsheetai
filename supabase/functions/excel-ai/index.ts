@@ -79,10 +79,32 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const { instruction, schema, history, model } = body;
+    const { instruction, schema, history, model, mode, sample } = body;
 
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY missing");
+
+    // Summary mode: return a plain markdown executive summary, no tool call.
+    if (mode === "summary") {
+      const sumResp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: model || "google/gemini-3-flash-preview",
+          messages: [
+            { role: "system", content: "You are a senior data analyst. Write concise executive summaries with concrete numbers and bullet highlights. Plain English." },
+            { role: "user", content: `${instruction}\n\nSchema:\n${JSON.stringify(schema)}\n\nSample rows (max 50):\n${JSON.stringify(sample || [])}` },
+          ],
+        }),
+      });
+      if (!sumResp.ok) {
+        const t = await sumResp.text();
+        return new Response(JSON.stringify({ error: `AI error: ${t}` }), { status: sumResp.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      const sd = await sumResp.json();
+      const text = sd.choices?.[0]?.message?.content || "No summary returned.";
+      return new Response(JSON.stringify({ explanation: text }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
     const userContent = `# Workbook schema\n\`\`\`json\n${JSON.stringify(schema, null, 2)}\n\`\`\`\n\n# User instruction\n${instruction}`;
 
