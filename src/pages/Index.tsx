@@ -10,7 +10,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Download, RotateCcw, Sparkles, Database } from "lucide-react";
 import { parseFile, exportSheets } from "@/lib/fileIO";
 import type { Sheets, Sheet } from "@/lib/dataEngine";
-import { ACTIONS, type ActionSpec, geocodeRows } from "@/lib/actions";
+import { type ActionSpec, geocodeRows } from "@/lib/actions";
 import { toast } from "sonner";
 
 const Index = () => {
