@@ -6,16 +6,16 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Download, RotateCcw, Sparkles, Database } from "lucide-react";
 import { parseFile, exportSheets } from "@/lib/fileIO";
-import { applyPlan, buildSchema, type Sheets, type Sheet } from "@/lib/dataEngine";
+import { runProgram, buildSchema, type Sheets, type Sheet, type Program } from "@/lib/dataEngine";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 const DEFAULT_SUGGESTIONS = [
-  "Clean the data",
-  "Remove duplicate rows",
-  "Group by category and sum revenue",
-  "Sort by date descending",
-  "Create a summary pivot table",
+  "Clean the data and remove duplicates",
+  "Top 10 rows by the largest numeric column",
+  "Group by the first text column and count rows",
+  "Build a pivot summary",
+  "Show column stats (nulls, unique, sample)",
 ];
 
 const Index = () => {
@@ -52,35 +52,46 @@ const Index = () => {
     setLoading(true);
 
     try {
-      const schema = buildSchema(sheets);
+      const schema = { active_sheet: activeSheet, sheets: buildSchema(sheets) };
       const history = newMessages.slice(-6, -1).map((m) => ({ role: m.role, content: m.content }));
       const { data, error } = await supabase.functions.invoke("excel-ai", {
-        body: { instruction, schema: { active_sheet: activeSheet, sheets: schema }, history },
+        body: { instruction, schema, history },
       });
-
       if (error) throw new Error(error.message || "AI request failed");
       if (data?.error) throw new Error(data.error);
 
-      const plan = data as { explanation: string; target_sheet?: string; output_sheet_name?: string; operations: any[] };
+      const program = data as Program;
 
-      if (!plan.operations?.length) {
-        setMessages([...newMessages, { role: "assistant", content: plan.explanation || "I couldn't determine an action. Try rephrasing.", error: true }]);
+      if (program.needs_clarification || !program.code) {
+        setMessages([
+          ...newMessages,
+          { role: "assistant", content: program.explanation || program.needs_clarification || "I need more info.", error: true },
+        ]);
         return;
       }
 
       try {
-        const { sheet, outputName } = applyPlan(sheets, activeSheet, plan);
-        const next = { ...sheets, [outputName]: sheet };
+        const { produced, message } = await runProgram(program, sheets, activeSheet);
+        const next = { ...sheets };
+        produced.forEach((s) => { next[s.name] = s; });
         setSheets(next);
-        setActiveSheet(outputName);
-        setMessages([...newMessages, { role: "assistant", content: plan.explanation, ops: plan.operations.length }]);
+        setActiveSheet(produced[0].name);
+
+        const summary = produced.map((s) => `**${s.name}** — ${s.rows.length.toLocaleString()} rows × ${s.columns.length} cols`).join("  \n");
+        setMessages([
+          ...newMessages,
+          {
+            role: "assistant",
+            content: `**${program.title}**\n\n${program.explanation}\n\n${summary}${message ? `\n\n${message}` : ""}`,
+          },
+        ]);
       } catch (e: any) {
         setMessages([
           ...newMessages,
           {
             role: "assistant",
             error: true,
-            content: `**Couldn't apply the plan:** ${e.message}\n\nTry rephrasing or check that the column names match your sheet.`,
+            content: `**Couldn't run that:** ${e.message}\n\nTry rephrasing — for example, mention column names or which sheet to use.`,
           },
         ]);
       }
@@ -139,7 +150,7 @@ const Index = () => {
 
           {sheetNames.length > 1 && (
             <Tabs value={activeSheet} onValueChange={setActiveSheet}>
-              <TabsList className="bg-secondary/50">
+              <TabsList className="bg-secondary/50 flex-wrap h-auto">
                 {sheetNames.map((n) => (
                   <TabsTrigger key={n} value={n} className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
                     {n}
