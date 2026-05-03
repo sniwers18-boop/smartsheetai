@@ -1,30 +1,28 @@
 import { useMemo, useState } from "react";
 import { Dropzone } from "@/components/excelpro/Dropzone";
 import { DataTable } from "@/components/excelpro/DataTable";
-import { ChatPanel, type ChatMessage } from "@/components/excelpro/ChatPanel";
+import { ActionPanel } from "@/components/excelpro/ActionPanel";
+import { ActionDialog } from "@/components/excelpro/ActionDialog";
+import { ChartDialog } from "@/components/excelpro/ChartDialog";
+import { SummaryDialog } from "@/components/excelpro/SummaryDialog";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Download, RotateCcw, Sparkles, Database } from "lucide-react";
 import { parseFile, exportSheets } from "@/lib/fileIO";
-import { runProgram, buildSchema, type Sheets, type Sheet, type Program } from "@/lib/dataEngine";
-import { supabase } from "@/integrations/supabase/client";
+import type { Sheets, Sheet } from "@/lib/dataEngine";
+import { type ActionSpec, geocodeRows } from "@/lib/actions";
 import { toast } from "sonner";
-
-const DEFAULT_SUGGESTIONS = [
-  "Clean the data and remove duplicates",
-  "Top 10 rows by the largest numeric column",
-  "Group by the first text column and count rows",
-  "Build a pivot summary",
-  "Show column stats (nulls, unique, sample)",
-];
 
 const Index = () => {
   const [originalSheets, setOriginalSheets] = useState<Sheets | null>(null);
   const [sheets, setSheets] = useState<Sheets | null>(null);
   const [activeSheet, setActiveSheet] = useState<string>("");
   const [fileName, setFileName] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [action, setAction] = useState<ActionSpec | null>(null);
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [chartOpen, setChartOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
   const sheetNames = useMemo(() => (sheets ? Object.keys(sheets) : []), [sheets]);
   const current: Sheet | null = sheets && activeSheet ? sheets[activeSheet] : null;
@@ -38,68 +36,35 @@ const Index = () => {
       setSheets(parsed);
       setActiveSheet(names[0]);
       setFileName(file.name);
-      setMessages([]);
       toast.success(`Loaded ${file.name}`, { description: `${names.length} sheet(s) detected` });
     } catch (e: any) {
       toast.error("Could not read file", { description: e.message });
     }
   };
 
-  const onSend = async (instruction: string) => {
-    if (!sheets || !activeSheet) return;
-    const newMessages: ChatMessage[] = [...messages, { role: "user", content: instruction }];
-    setMessages(newMessages);
-    setLoading(true);
+  const pickAction = (a: ActionSpec) => { setAction(a); setOpen(true); };
 
+  const runAction = async (params: Record<string, any>) => {
+    if (!action || !sheets) return;
+    setRunning(true);
     try {
-      const schema = { active_sheet: activeSheet, sheets: buildSchema(sheets) };
-      const history = newMessages.slice(-6, -1).map((m) => ({ role: m.role, content: m.content }));
-      const { data, error } = await supabase.functions.invoke("excel-ai", {
-        body: { instruction, schema, history },
-      });
-      if (error) throw new Error(error.message || "AI request failed");
-      if (data?.error) throw new Error(data.error);
-
-      const program = data as Program;
-
-      if (program.needs_clarification || !program.code) {
-        setMessages([
-          ...newMessages,
-          { role: "assistant", content: program.explanation || program.needs_clarification || "I need more info.", error: true },
-        ]);
-        return;
+      let result;
+      if (action.id === "geocode") {
+        toast.info("Geocoding via OpenStreetMap…", { description: "~1 row per second" });
+        result = await geocodeRows(sheets, activeSheet, params.col, Number(params.limit) || 25);
+      } else {
+        result = action.run(sheets, activeSheet, params);
       }
-
-      try {
-        const { produced, message } = await runProgram(program, sheets, activeSheet);
-        const next = { ...sheets };
-        produced.forEach((s) => { next[s.name] = s; });
-        setSheets(next);
-        setActiveSheet(produced[0].name);
-
-        const summary = produced.map((s) => `**${s.name}** — ${s.rows.length.toLocaleString()} rows × ${s.columns.length} cols`).join("  \n");
-        setMessages([
-          ...newMessages,
-          {
-            role: "assistant",
-            content: `**${program.title}**\n\n${program.explanation}\n\n${summary}${message ? `\n\n${message}` : ""}`,
-          },
-        ]);
-      } catch (e: any) {
-        setMessages([
-          ...newMessages,
-          {
-            role: "assistant",
-            error: true,
-            content: `**Couldn't run that:** ${e.message}\n\nTry rephrasing — for example, mention column names or which sheet to use.`,
-          },
-        ]);
-      }
+      const next = { ...sheets };
+      result.produced.forEach((s) => { next[s.name] = s; });
+      setSheets(next);
+      setActiveSheet(result.produced[0].name);
+      toast.success(action.label, { description: result.message });
+      setOpen(false);
     } catch (e: any) {
-      setMessages([...newMessages, { role: "assistant", content: e.message, error: true }]);
-      toast.error("AI error", { description: e.message });
+      toast.error("Couldn't run that", { description: e.message });
     } finally {
-      setLoading(false);
+      setRunning(false);
     }
   };
 
@@ -107,7 +72,6 @@ const Index = () => {
     if (originalSheets) {
       setSheets(originalSheets);
       setActiveSheet(Object.keys(originalSheets)[0]);
-      setMessages([]);
       toast.info("Reverted to original data");
     }
   };
@@ -130,7 +94,7 @@ const Index = () => {
             </div>
             <div>
               <h1 className="text-lg font-semibold tracking-tight">ExcelPro AI</h1>
-              <p className="text-xs text-muted-foreground">Premium spreadsheet automation, powered by AI</p>
+              <p className="text-xs text-muted-foreground">Premium spreadsheet automation — operator toolbox</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -144,7 +108,7 @@ const Index = () => {
         </div>
       </header>
 
-      <section className="mx-auto grid max-w-[1400px] grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-[1fr_420px]">
+      <section className="mx-auto grid max-w-[1400px] grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
           <Dropzone onFile={onFile} fileName={fileName} />
 
@@ -172,15 +136,28 @@ const Index = () => {
         </div>
 
         <aside className="lg:h-[calc(100vh-9rem)] lg:sticky lg:top-6">
-          <ChatPanel
-            messages={messages}
-            onSend={onSend}
+          <ActionPanel
             disabled={!sheets}
-            loading={loading}
-            suggestions={DEFAULT_SUGGESTIONS}
+            onPick={pickAction}
+            onChart={() => setChartOpen(true)}
+            onSummary={() => setSummaryOpen(true)}
           />
         </aside>
       </section>
+
+      {sheets && (
+        <ActionDialog
+          action={action}
+          sheets={sheets}
+          activeSheet={activeSheet}
+          open={open}
+          onOpenChange={setOpen}
+          onRun={runAction}
+          loading={running}
+        />
+      )}
+      <ChartDialog sheet={current} open={chartOpen} onOpenChange={setChartOpen} />
+      <SummaryDialog sheet={current} open={summaryOpen} onOpenChange={setSummaryOpen} />
     </main>
   );
 };
